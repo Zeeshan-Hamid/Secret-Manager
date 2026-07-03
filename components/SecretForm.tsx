@@ -75,8 +75,14 @@ export default function SecretForm({ onLinkGenerated }: SecretFormProps) {
       if (isCombined && imageFile) {
         // --- Combined: text + image packed into one encrypted blob ---
         const imageBytes = await imageFile.arrayBuffer();
+        console.log("[SecretForm] Image bytes:", imageBytes.byteLength);
+        console.log("[SecretForm] Text length:", secretText.trim().length);
+        
         const packed = packPayload(secretText.trim(), imageBytes);
+        console.log("[SecretForm] Packed size:", packed.byteLength, "bytes");
+        
         const encryptedBytes = await encryptBytes(packed, key);
+        console.log("[SecretForm] Encrypted size:", encryptedBytes.byteLength, "bytes");
 
         const encryptedBlob = new Blob([encryptedBytes], {
           type: "application/octet-stream",
@@ -95,6 +101,7 @@ export default function SecretForm({ onLinkGenerated }: SecretFormProps) {
         }
 
         const { url: blobUrl } = await uploadRes.json();
+        console.log("[SecretForm] Combined Blob URL:", blobUrl.substring(0, 60) + "...");
 
         response = await fetch("/api/secrets", {
           method: "POST",

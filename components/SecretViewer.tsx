@@ -67,57 +67,65 @@ export default function SecretViewer() {
           return;
         }
 
-        // All secrets return JSON now (text, image, combined).
-        // Image/combined have a `blobUrl` field pointing to the encrypted
-        // public blob. The viewer fetches it directly.
-        const data = await response.json();
         const keyBytes = keyFragmentToBytes(fragment);
+        const contentType = response.headers.get("content-type") ?? "";
+        const isBinary = !contentType.includes("application/json");
 
-        if ("type" in data && (data.type === "image" || data.type === "combined")) {
-          // --- Image or Combined ---
+        if (isBinary) {
+          // --- Image or Combined (binary response) ---
+          const secretType = response.headers.get("x-secret-type");
+          console.log("[SecretViewer] Binary response, type:", secretType);
           setIsImage(true);
-          const blobUrl: string = data.blobUrl;
 
-          // Fetch encrypted bytes from the public Blob URL
-          const blobRes = await fetch(blobUrl);
-          if (!blobRes.ok) {
-            setViewState("error");
-            setErrorMessage("Failed to retrieve the encrypted data.");
-            return;
-          }
-          const encryptedBytes = await blobRes.arrayBuffer();
+          const encryptedBytes = await response.arrayBuffer();
+          console.log("[SecretViewer] Encrypted size:", encryptedBytes.byteLength, "bytes");
 
-          if (data.type === "combined") {
-            // Combined: text + image
+          if (secretType === "combined") {
             setIsCombined(true);
+            console.log("[SecretViewer] Decrypting combined payload...");
             const decryptedBytes = await decryptToBytes(encryptedBytes, keyBytes);
+            console.log("[SecretViewer] Decrypted size:", decryptedBytes.byteLength, "bytes");
+
+            console.log("[SecretViewer] Unpacking...");
             const { text, imageBytes } = unpackPayload(decryptedBytes);
+            console.log("[SecretViewer] Unpacked — text:", text.length, "img:", imageBytes.byteLength);
             setPlaintext(text);
 
-            const imageContentType = data.imageContentType || "image/png";
+            const imageContentType =
+              response.headers.get("x-image-content-type") || "image/png";
             const imageBlob = new Blob([imageBytes], { type: imageContentType });
             const url = URL.createObjectURL(imageBlob);
             objectUrlRef.current = url;
             setImageUrl(url);
           } else {
-            // Image only
+            console.log("[SecretViewer] Decrypting image...");
             const decryptedBytes = await decryptToBytes(encryptedBytes, keyBytes);
-            const imageType = data.contentType || "image/png";
+            console.log("[SecretViewer] Decrypted size:", decryptedBytes.byteLength, "bytes");
+
+            const imageType =
+              response.headers.get("x-image-content-type") || "image/png";
             const blob = new Blob([decryptedBytes], { type: imageType });
             const url = URL.createObjectURL(blob);
             objectUrlRef.current = url;
             setImageUrl(url);
           }
         } else {
-          // --- Text only ---
+          // --- Text secret (JSON response) ---
           const data = await response.json();
-          const decrypted = await decrypt(data.encryptedBlob, keyBytes);
+          console.log("[SecretViewer] Text response");
+
+          const decrypted = await decrypt(
+            (data as { encryptedBlob: string }).encryptedBlob,
+            keyBytes
+          );
+          console.log("[SecretViewer] Text length:", decrypted.length);
           setPlaintext(decrypted);
         }
 
         setViewState("decrypted");
         history.replaceState(null, "", window.location.pathname);
-      } catch {
+      } catch (err) {
+        console.error("[SecretViewer] Decryption failed:", err);
         setViewState("error");
         setErrorMessage(
           "Decryption failed. The secret may have been tampered with or the link is incomplete."

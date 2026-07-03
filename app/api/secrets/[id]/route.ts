@@ -1,16 +1,16 @@
 import { redisGetdel } from "@/lib/redis";
+import { get } from "@/lib/blob";
 
 /**
  * Response types:
- * - Text secrets: JSON { encryptedBlob }
- * - Image secrets: JSON { type: "image", blobUrl, contentType }
- * - Combined secrets: JSON { type: "combined", blobUrl, imageContentType }
+ * - Text secrets: JSON { encryptedBlob }, Content-Type: application/json
+ * - Image/combined: binary stream, Content-Type: application/octet-stream
+ *   + X-Secret-Type: "image" or "combined"
+ *   + X-Image-Content-Type: original image MIME type
  *
- * The encrypted blob remains in Vercel Blob after viewing. It is
- * AES-256-GCM ciphertext — useless without the decryption key that
- * was in the URL fragment (now cleared from the viewer's browser).
- * Cleanup of orphaned blobs can be handled by a periodic sweep or
- * Vercel Blob lifecycle policy.
+ * For image/combined, the server fetches the encrypted blob via the SDK's
+ * get() which auto-attaches credentials (OIDC or BLOB_READ_WRITE_TOKEN).
+ * No CORS issues since it's server-to-server.
  */
 
 export async function GET(
@@ -43,19 +43,48 @@ export async function GET(
       imageContentType?: string;
     };
 
-    if (record.type === "combined") {
-      return Response.json({
-        type: "combined",
-        blobUrl: record.blobUrl,
-        imageContentType: record.imageContentType,
+    try {
+      console.log("[GET secret] Fetching blob:", record.blobUrl.substring(0, 80));
+      const blob = await get(record.blobUrl, {
+        access: (process.env.BLOB_ACCESS as "public" | "private") || "public",
       });
-    }
 
-    return Response.json({
-      type: "image",
-      blobUrl: record.blobUrl,
-      contentType: record.contentType,
-    });
+      if (!blob) {
+        console.error("[GET secret] Blob not found or no access");
+        return Response.json(
+          { error: "Failed to retrieve encrypted data" },
+          { status: 500 }
+        );
+      }
+
+      console.log(
+        "[GET secret] Blob fetched:",
+        blob.blob?.contentType,
+        blob.blob?.size,
+        "bytes"
+      );
+
+      const imageType =
+        record.contentType || record.imageContentType || "image/png";
+
+      return new Response(blob.stream, {
+        headers: {
+          "Content-Type": "application/octet-stream",
+          "X-Secret-Type": record.type,
+          "X-Image-Content-Type": imageType,
+          "Cache-Control": "no-store",
+        },
+      });
+    } catch (err) {
+      console.error(
+        "[GET secret] Fatal error:",
+        err instanceof Error ? err.message : String(err)
+      );
+      return Response.json(
+        { error: "Internal server error" },
+        { status: 500 }
+      );
+    }
   }
 
   return Response.json({ encryptedBlob: value as string });

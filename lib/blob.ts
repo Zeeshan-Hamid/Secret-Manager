@@ -1,1 +1,1 @@
-export { del, put } from "@vercel/blob";
+export { put, get } from "@vercel/blob";
