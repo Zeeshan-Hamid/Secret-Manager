@@ -49,22 +49,36 @@ Share passwords, API keys, credentials, and confidential text securely. Every se
 ### System Architecture — Container Diagram
 
 ```mermaid
-C4Context
-    title System Architecture — Secret Manager
+flowchart LR
+    subgraph Creator["Creator's Browser"]
+        C[/"Type secret"/]
+    end
 
-    Person(creator, "Creator", "Company employee sharing a secret")
-    Person(viewer, "Viewer", "Recipient opening the link")
+    subgraph Viewer["Viewer's Browser"]
+        V[/"Open link"/]
+    end
 
-    Boundary(vercel, "Vercel Platform", "") {
-        System(nextjs, "Next.js Application", "App Router, API Routes")
-        Boundary(upstash, "Upstash Redis", "") {
-            SystemDb(redis, "Redis Store", "Key-Value, serverless")
-        }
-    }
+    subgraph Vercel["Vercel Platform"]
+        subgraph NextJS["Next.js"]
+            API["API Routes<br/>POST & GET /api/secrets"]
+        end
+        subgraph Redis["Upstash Redis"]
+            DB[("Encrypted<br/>blobs<br/>+ TTL")]
+        end
+    end
 
-    Rel(creator, nextjs, "POST /api/secrets", "HTTPS — encrypted blob only")
-    Rel(viewer, nextjs, "GET /api/secrets/:id", "HTTPS — no auth required")
-    Rel(nextjs, redis, "SET with TTL, GETDEL", "TLS")
+    Creator -->|"POST {encryptedBlob}<br/>Key stays in browser"| API
+    Viewer -->|"GET /api/secrets/{id}"| API
+    API -->|"SET + TTL"| DB
+    API -->|"GETDEL"| DB
+
+    style Creator fill:#1a1a2e,stroke:#f59e0b,color:#fafafa
+    style Viewer fill:#1a1a2e,stroke:#10b981,color:#fafafa
+    style Vercel fill:#18181b,stroke:#3f3f46,color:#a1a1aa
+    style NextJS fill:#27272a,stroke:#52525b,color:#fafafa
+    style Redis fill:#27272a,stroke:#ef4444,color:#fafafa
+    style DB fill:#1a1a2e,stroke:#ef4444,color:#fbbf24
+    style API fill:#1a1a2e,stroke:#52525b,color:#fafafa
 ```
 
 ### Creator Flow — Sequence Diagram
@@ -78,10 +92,10 @@ sequenceDiagram
 
     C->>B: Types secret text + clicks "Create"
 
-    Note over B: 🔐 Generate 256-bit AES-GCM key (random)
-    Note over B: 🔐 Generate 96-bit IV (random nonce)
-    Note over B: 🔐 Encrypt plaintext with Web Crypto API
-    Note over B: 🔐 Package: base64url(IV + ciphertext + auth tag)
+    Note over B: [Generate 256-bit AES-GCM key]
+    Note over B: [Generate 96-bit IV (random nonce)]
+    Note over B: [Encrypt plaintext with Web Crypto API]
+    Note over B: [Package: base64url(IV + ciphertext + auth tag)]
 
     B->>S: POST /api/secrets { encryptedBlob }
     Note over S: Validate input (Zod)
@@ -93,7 +107,9 @@ sequenceDiagram
     Note over B: Construct link:<br/>/s/{id}#{base64url(key)}
     B-->>C: Display link + copy button
 
-    Note over C,R: ❌ Key was NEVER sent to server.<br/>✅ Server has only encrypted blob.<br/>⏱️ Blob auto-deletes after TTL.
+    Note over C,R: Key was NEVER sent to server.
+    Note over C,R: Server has only encrypted blob.
+    Note over C,R: Blob auto-deletes after TTL.
 ```
 
 ### Viewer Flow — Sequence Diagram
@@ -115,7 +131,7 @@ sequenceDiagram
     Note over S: No auth — public endpoint
     S->>R: GETDEL secret:{id}
 
-    alt ✅ Secret exists (first view)
+    alt Secret exists (first view)
         R-->>S: { encryptedBlob }
         S-->>B: 200 { encryptedBlob }
         Note over R: Key deleted atomically
@@ -124,11 +140,11 @@ sequenceDiagram
         Note over B: AES-256-GCM decrypt + verify auth tag
         Note over B: Clear fragment from URL bar
         B-->>V: Display plaintext + copy button
-    else 🗑️ Already viewed or expired
+    else Already viewed or expired
         R-->>S: nil
         S-->>B: 410 Gone
         B-->>V: "Secret no longer available"
-    else ❌ Invalid / unknown ID
+    else Invalid or unknown ID
         R-->>S: nil
         S-->>B: 410 Gone
         B-->>V: "Secret no longer available"
@@ -140,38 +156,45 @@ sequenceDiagram
 ### Security Trust Boundaries
 
 ```mermaid
-graph TB
-    subgraph Browser["🖥️ TRUST BOUNDARY: Browser"]
-        Plaintext["✉️ Plaintext Secret"]
-        Key["🔑 AES-256 Key"]
+flowchart LR
+    subgraph Browser["Browser (Trusted)"]
+        direction TB
+        Plaintext["Plaintext Secret"]
+        Key["AES-256 Key"]
         Crypto["Web Crypto API"]
-        Fragment["URL Fragment (#key)"]
-
-        Plaintext -->|encrypt| Crypto
-        Key -->|encrypt| Crypto
-        Crypto -->|produces| Encrypted["🔒 Encrypted Blob"]
-        Key -->|stored in| Fragment
+        Fragment["URL Fragment']
+        Encrypted["Encrypted Blob"]
+        Plaintext --> Crypto
+        Key --> Crypto
+        Crypto --> Encrypted
+        Key --> Fragment
     end
 
-    subgraph Network["🌐 TRUST BOUNDARY: Network"]
-        TLS["HTTPS / TLS 1.3<br/>Only encrypted blobs cross this boundary"]
+    subgraph Network["Network (TLS 1.3)"]
+        TLS["Encrypted traffic only"]
     end
 
-    subgraph Server["☁️ TRUST BOUNDARY: Server"]
-        API["Next.js API Routes"]
-        Redis["Upstash Redis<br/>Key: secret:{id}<br/>Value: encrypted blob<br/>TTL enforced at Redis level"]
-        API -->|SET with TTL<br/>GETDEL| Redis
+    subgraph Server["Server (Untrusted)"]
+        direction TB
+        API["API Routes"]
+        DB[("Redis Store")]
+        API -->|"SET / GETDEL"| DB
     end
 
-    Browser -->|"POST {encryptedBlob}<br/>No key, no plaintext"| Network
-    Network -->|TLS encrypted| Server
-    Server -->|"{encryptedBlob} or 410"| Network
-    Network -->|TLS encrypted| Browser
+    Browser -->|"POST {blob} | No key, no plaintext"| Network
+    Network --> Server
+    Server -->|"{blob} or 410 Gone"| Network
+    Network --> Browser
 
-    style Plaintext fill:#f96,stroke:#333,color:#000
-    style Key fill:#f96,stroke:#333,color:#000
-    style Fragment fill:#f96,stroke:#333,color:#000
-    style Encrypted fill:#6f6,stroke:#333,color:#000
+    style Plaintext fill:#991b1b,stroke:#ef4444,color:#fca5a5
+    style Key fill:#991b1b,stroke:#ef4444,color:#fca5a5
+    style Fragment fill:#991b1b,stroke:#ef4444,color:#fca5a5
+    style Encrypted fill:#14532d,stroke:#22c55e,color:#86efac
+    style Browser fill:#1a1a2e,stroke:#f59e0b,color:#fafafa
+    style Server fill:#18181b,stroke:#ef4444,color:#f87171
+    style Network fill:#27272a,stroke:#3b82f6,color:#93c5fd
+    style DB fill:#1a1a2e,stroke:#ef4444,color:#fbbf24
+    style API fill:#1a1a2e,stroke:#52525b,color:#fafafa
 ```
 
 ### Secret Lifecycle — State Machine
