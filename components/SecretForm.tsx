@@ -22,6 +22,7 @@ const ALLOWED_IMAGE_TYPES = [
   "image/gif",
 ];
 const ACCEPT_STRING = ALLOWED_IMAGE_TYPES.join(",");
+const MAX_IMAGE_SIZE_MB = 8;
 
 export default function SecretForm({ onLinkGenerated }: SecretFormProps) {
   const [secretText, setSecretText] = useState("");
@@ -36,6 +37,14 @@ export default function SecretForm({ onLinkGenerated }: SecretFormProps) {
 
   function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0] ?? null;
+    if (file && file.size > MAX_IMAGE_SIZE_MB * 1024 * 1024) {
+      setError(
+        `Image size exceeds ${MAX_IMAGE_SIZE_MB} MB. Please select a smaller file.`
+      );
+      setImageFile(null);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      return;
+    }
     setImageFile(file);
     setError(null);
   }

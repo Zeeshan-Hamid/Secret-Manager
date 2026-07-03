@@ -3,7 +3,7 @@ import { put } from "@vercel/blob";
 const BLOB_ACCESS = (process.env.BLOB_ACCESS as "public" | "private") || "public";
 const MAX_IMAGE_SIZE_MB = process.env.MAX_IMAGE_SIZE_MB
   ? parseInt(process.env.MAX_IMAGE_SIZE_MB, 10)
-  : 10;
+  : 8;
 
 export async function POST(request: Request) {
   try {
