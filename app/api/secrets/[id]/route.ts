@@ -1,13 +1,16 @@
 import { redisGetdel } from "@/lib/redis";
-import { get, del } from "@/lib/blob";
 
 /**
  * Response types:
  * - Text secrets: JSON { encryptedBlob }
- * - Image secrets: binary, X-Secret-Type: image, Content-Type = image MIME
- * - Combined secrets: binary, X-Secret-Type: combined, Content-Type = octet-stream
+ * - Image secrets: JSON { type: "image", blobUrl, contentType }
+ * - Combined secrets: JSON { type: "combined", blobUrl, imageContentType }
  *
- * The viewer detects the type via X-Secret-Type header.
+ * The encrypted blob remains in Vercel Blob after viewing. It is
+ * AES-256-GCM ciphertext — useless without the decryption key that
+ * was in the URL fragment (now cleared from the viewer's browser).
+ * Cleanup of orphaned blobs can be handled by a periodic sweep or
+ * Vercel Blob lifecycle policy.
  */
 
 export async function GET(
@@ -39,45 +42,20 @@ export async function GET(
       contentType?: string;
       imageContentType?: string;
     };
-    const isCombined = record.type === "combined";
 
-    try {
-      const blob = await get(record.blobUrl, { access: "private" });
-
-      if (!blob) {
-        return Response.json(
-          { error: "Encrypted data not found" },
-          { status: 500 }
-        );
-      }
-
-      // Fire-and-forget delete
-      try {
-        del(record.blobUrl).catch(() => {});
-      } catch {
-        // Sync throw — ignore
-      }
-
-      const imageType =
-        record.contentType || record.imageContentType || "image/png";
-
-      return new Response(blob.stream, {
-        headers: {
-          "Content-Type": isCombined
-            ? "application/octet-stream"
-            : imageType,
-          "X-Secret-Type": isCombined ? "combined" : "image",
-          "X-Image-Content-Type": imageType,
-          "Cache-Control": "no-store",
-        },
+    if (record.type === "combined") {
+      return Response.json({
+        type: "combined",
+        blobUrl: record.blobUrl,
+        imageContentType: record.imageContentType,
       });
-    } catch (err) {
-      console.error("Failed to fetch or delete Blob:", err);
-      return Response.json(
-        { error: "Internal server error" },
-        { status: 500 }
-      );
     }
+
+    return Response.json({
+      type: "image",
+      blobUrl: record.blobUrl,
+      contentType: record.contentType,
+    });
   }
 
   return Response.json({ encryptedBlob: value as string });

@@ -67,48 +67,42 @@ export default function SecretViewer() {
           return;
         }
 
-        const secretType = response.headers.get("x-secret-type");
-        const contentType = response.headers.get("content-type") ?? "";
-        const isBinary = !contentType.includes("application/json");
+        // All secrets return JSON now (text, image, combined).
+        // Image/combined have a `blobUrl` field pointing to the encrypted
+        // public blob. The viewer fetches it directly.
+        const data = await response.json();
         const keyBytes = keyFragmentToBytes(fragment);
 
-        if (isBinary) {
-          const encryptedBytes = await response.arrayBuffer();
+        if ("type" in data && (data.type === "image" || data.type === "combined")) {
+          // --- Image or Combined ---
+          setIsImage(true);
+          const blobUrl: string = data.blobUrl;
 
-          if (secretType === "combined") {
-            // --- Combined: text + image ---
-            setIsImage(true);
+          // Fetch encrypted bytes from the public Blob URL
+          const blobRes = await fetch(blobUrl);
+          if (!blobRes.ok) {
+            setViewState("error");
+            setErrorMessage("Failed to retrieve the encrypted data.");
+            return;
+          }
+          const encryptedBytes = await blobRes.arrayBuffer();
+
+          if (data.type === "combined") {
+            // Combined: text + image
             setIsCombined(true);
-
-            const decryptedBytes = await decryptToBytes(
-              encryptedBytes,
-              keyBytes
-            );
-
-            // Unpack into text and image
+            const decryptedBytes = await decryptToBytes(encryptedBytes, keyBytes);
             const { text, imageBytes } = unpackPayload(decryptedBytes);
             setPlaintext(text);
 
-            const imageContentType =
-              response.headers.get("x-image-content-type") || "image/png";
-            const imageBlob = new Blob([imageBytes], {
-              type: imageContentType,
-            });
+            const imageContentType = data.imageContentType || "image/png";
+            const imageBlob = new Blob([imageBytes], { type: imageContentType });
             const url = URL.createObjectURL(imageBlob);
             objectUrlRef.current = url;
             setImageUrl(url);
           } else {
-            // --- Image only ---
-            setIsImage(true);
-
-            const decryptedBytes = await decryptToBytes(
-              encryptedBytes,
-              keyBytes
-            );
-
-            const imageType = contentType.includes("/")
-              ? contentType.split(";")[0].trim()
-              : "image/png";
+            // Image only
+            const decryptedBytes = await decryptToBytes(encryptedBytes, keyBytes);
+            const imageType = data.contentType || "image/png";
             const blob = new Blob([decryptedBytes], { type: imageType });
             const url = URL.createObjectURL(blob);
             objectUrlRef.current = url;

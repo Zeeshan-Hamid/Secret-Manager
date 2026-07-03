@@ -1,5 +1,6 @@
 import { put } from "@vercel/blob";
 
+const BLOB_ACCESS = (process.env.BLOB_ACCESS as "public" | "private") || "public";
 const MAX_IMAGE_SIZE_MB = process.env.MAX_IMAGE_SIZE_MB
   ? parseInt(process.env.MAX_IMAGE_SIZE_MB, 10)
   : 10;
@@ -43,7 +44,7 @@ export async function POST(request: Request) {
     // On Vercel: uses OIDC (VERCEL_OIDC_TOKEN + BLOB_STORE_ID)
     // Local dev: falls back to BLOB_READ_WRITE_TOKEN
     const blob = await put(file.name, file, {
-      access: "private",
+      access: BLOB_ACCESS,
       addRandomSuffix: true,
     });
 
