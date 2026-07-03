@@ -1,20 +1,41 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { decrypt, keyFragmentToBytes } from "@/lib/crypto";
-import { ViewState, ViewSecretResponse } from "@/lib/types";
-import { Shield, Lock, EyeOff, AlertTriangle, Loader2, Copy, Check } from "lucide-react";
+import { useEffect, useState, useRef } from "react";
+import {
+  decrypt,
+  decryptToBytes,
+  unpackPayload,
+  keyFragmentToBytes,
+} from "@/lib/crypto";
+import { ViewState } from "@/lib/types";
+import {
+  Shield,
+  Lock,
+  EyeOff,
+  AlertTriangle,
+  Loader2,
+  Copy,
+  Check,
+  Image as ImageIcon,
+  Download,
+  FileText,
+} from "lucide-react";
 
 export default function SecretViewer() {
   const [viewState, setViewState] = useState<ViewState>("loading");
   const [plaintext, setPlaintext] = useState<string | null>(null);
+  const [imageUrl, setImageUrl] = useState<string | null>(null);
+  const [isImage, setIsImage] = useState(false);
+  const [isCombined, setIsCombined] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [downloaded, setDownloaded] = useState(false);
+
+  const objectUrlRef = useRef<string | null>(null);
 
   useEffect(() => {
     async function fetchAndDecrypt() {
       try {
-        // Extract the ID from the URL path
         const pathParts = window.location.pathname.split("/");
         const id = pathParts[pathParts.length - 1];
 
@@ -24,12 +45,9 @@ export default function SecretViewer() {
           return;
         }
 
-        // Fetch the encrypted blob from the server FIRST —
-        // this determines whether the secret exists regardless of the key
         const response = await fetch(`/api/secrets/${id}`);
 
         if (response.status === 410) {
-          // Secret was already viewed or expired. The fragment/key is irrelevant.
           setViewState("expired");
           return;
         }
@@ -40,7 +58,6 @@ export default function SecretViewer() {
           return;
         }
 
-        // Blob exists — now we need the key to decrypt it
         const fragment = window.location.hash.slice(1);
         if (!fragment) {
           setViewState("error");
@@ -50,16 +67,61 @@ export default function SecretViewer() {
           return;
         }
 
-        const { encryptedBlob }: ViewSecretResponse = await response.json();
-
-        // Decode the key and decrypt
+        const secretType = response.headers.get("x-secret-type");
+        const contentType = response.headers.get("content-type") ?? "";
+        const isBinary = !contentType.includes("application/json");
         const keyBytes = keyFragmentToBytes(fragment);
-        const decrypted = await decrypt(encryptedBlob, keyBytes);
 
-        setPlaintext(decrypted);
+        if (isBinary) {
+          const encryptedBytes = await response.arrayBuffer();
+
+          if (secretType === "combined") {
+            // --- Combined: text + image ---
+            setIsImage(true);
+            setIsCombined(true);
+
+            const decryptedBytes = await decryptToBytes(
+              encryptedBytes,
+              keyBytes
+            );
+
+            // Unpack into text and image
+            const { text, imageBytes } = unpackPayload(decryptedBytes);
+            setPlaintext(text);
+
+            const imageContentType =
+              response.headers.get("x-image-content-type") || "image/png";
+            const imageBlob = new Blob([imageBytes], {
+              type: imageContentType,
+            });
+            const url = URL.createObjectURL(imageBlob);
+            objectUrlRef.current = url;
+            setImageUrl(url);
+          } else {
+            // --- Image only ---
+            setIsImage(true);
+
+            const decryptedBytes = await decryptToBytes(
+              encryptedBytes,
+              keyBytes
+            );
+
+            const imageType = contentType.includes("/")
+              ? contentType.split(";")[0].trim()
+              : "image/png";
+            const blob = new Blob([decryptedBytes], { type: imageType });
+            const url = URL.createObjectURL(blob);
+            objectUrlRef.current = url;
+            setImageUrl(url);
+          }
+        } else {
+          // --- Text only ---
+          const data = await response.json();
+          const decrypted = await decrypt(data.encryptedBlob, keyBytes);
+          setPlaintext(decrypted);
+        }
+
         setViewState("decrypted");
-
-        // Clear the fragment from the URL so the key is no longer visible
         history.replaceState(null, "", window.location.pathname);
       } catch {
         setViewState("error");
@@ -70,6 +132,13 @@ export default function SecretViewer() {
     }
 
     fetchAndDecrypt();
+
+    return () => {
+      if (objectUrlRef.current) {
+        URL.revokeObjectURL(objectUrlRef.current);
+        objectUrlRef.current = null;
+      }
+    };
   }, []);
 
   async function handleCopy() {
@@ -79,7 +148,6 @@ export default function SecretViewer() {
       setCopied(true);
       setTimeout(() => setCopied(false), 2500);
     } catch {
-      // Fallback for older browsers or non-HTTPS contexts
       const textarea = document.createElement("textarea");
       textarea.value = plaintext;
       textarea.style.position = "fixed";
@@ -93,6 +161,18 @@ export default function SecretViewer() {
     }
   }
 
+  function handleDownload() {
+    if (!imageUrl) return;
+    const a = document.createElement("a");
+    a.href = imageUrl;
+    a.download = "decrypted-secret.png";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setDownloaded(true);
+    setTimeout(() => setDownloaded(false), 2500);
+  }
+
   return (
     <div className="w-full max-w-2xl">
       {/* Loading state */}
@@ -104,42 +184,130 @@ export default function SecretViewer() {
       )}
 
       {/* Decrypted state */}
-      {viewState === "decrypted" && plaintext !== null && (
+      {viewState === "decrypted" && (
         <div className="space-y-6">
           <div className="flex items-center gap-3">
-            <Shield className="w-6 h-6 text-emerald-500" />
+            {isImage ? (
+              <ImageIcon className="w-6 h-6 text-emerald-500" />
+            ) : (
+              <Shield className="w-6 h-6 text-emerald-500" />
+            )}
             <h2 className="font-mono text-sm font-semibold text-emerald-400 uppercase tracking-wider">
-              Secret Decrypted
+              {isCombined
+                ? "Secret Decrypted"
+                : isImage
+                  ? "Image Decrypted"
+                  : "Secret Decrypted"}
             </h2>
           </div>
 
-          <div className="bg-black border border-amber-500/30 rounded-md overflow-hidden">
-            <pre className="font-mono text-sm text-amber-100 whitespace-pre-wrap break-words leading-relaxed p-6">
-              {plaintext}
-            </pre>
-            <div className="border-t border-amber-500/20 px-4 py-3 flex items-center justify-end">
-              <button
-                onClick={handleCopy}
-                className="flex items-center gap-2 font-mono text-xs font-semibold uppercase tracking-wider
-                           bg-zinc-900 text-zinc-400 px-3 py-1.5 rounded
-                           hover:bg-zinc-800 hover:text-amber-400
-                           active:bg-zinc-700
-                           transition-colors border border-zinc-800"
-              >
-                {copied ? (
-                  <>
-                    <Check className="w-4 h-4 text-emerald-400" />
-                    <span className="text-emerald-400">Copied</span>
-                  </>
-                ) : (
-                  <>
-                    <Copy className="w-4 h-4" />
-                    <span>Copy Secret</span>
-                  </>
-                )}
-              </button>
+          {/* Combined: text first, then image */}
+          {isCombined && plaintext !== null && (
+            <div className="bg-black border border-amber-500/30 rounded-md overflow-hidden">
+              <div className="flex items-center gap-2 px-4 pt-4 pb-0">
+                <FileText className="w-4 h-4 text-amber-500" />
+                <span className="font-mono text-xs text-amber-400 uppercase tracking-wider">
+                  Text
+                </span>
+              </div>
+              <pre className="font-mono text-sm text-amber-100 whitespace-pre-wrap break-words leading-relaxed p-4 pt-2">
+                {plaintext}
+              </pre>
+              <div className="border-t border-amber-500/20 px-4 py-3 flex items-center justify-end">
+                <button
+                  onClick={handleCopy}
+                  className="flex items-center gap-2 font-mono text-xs font-semibold uppercase tracking-wider
+                             bg-zinc-900 text-zinc-400 px-3 py-1.5 rounded
+                             hover:bg-zinc-800 hover:text-amber-400
+                             active:bg-zinc-700
+                             transition-colors border border-zinc-800"
+                >
+                  {copied ? (
+                    <>
+                      <Check className="w-4 h-4 text-emerald-400" />
+                      <span className="text-emerald-400">Copied</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-4 h-4" />
+                      <span>Copy Text</span>
+                    </>
+                  )}
+                </button>
+              </div>
             </div>
-          </div>
+          )}
+
+          {isImage && imageUrl && (
+            <div className="bg-black border border-amber-500/30 rounded-md overflow-hidden">
+              {isCombined && (
+                <div className="flex items-center gap-2 px-4 pt-4 pb-0">
+                  <ImageIcon className="w-4 h-4 text-amber-500" />
+                  <span className="font-mono text-xs text-amber-400 uppercase tracking-wider">
+                    Image
+                  </span>
+                </div>
+              )}
+              <img
+                src={imageUrl}
+                alt="Decrypted secret image"
+                className={`w-full h-auto object-contain ${isCombined ? "max-h-[50vh]" : "max-h-[70vh]"}`}
+              />
+              <div className="border-t border-amber-500/20 px-4 py-3 flex items-center justify-end">
+                <button
+                  onClick={handleDownload}
+                  className="flex items-center gap-2 font-mono text-xs font-semibold uppercase tracking-wider
+                             bg-zinc-900 text-zinc-400 px-3 py-1.5 rounded
+                             hover:bg-zinc-800 hover:text-amber-400
+                             active:bg-zinc-700
+                             transition-colors border border-zinc-800"
+                >
+                  {downloaded ? (
+                    <>
+                      <Check className="w-4 h-4 text-emerald-400" />
+                      <span className="text-emerald-400">Downloaded</span>
+                    </>
+                  ) : (
+                    <>
+                      <Download className="w-4 h-4" />
+                      <span>Download</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Text-only (existing) */}
+          {!isImage && plaintext !== null && (
+            <div className="bg-black border border-amber-500/30 rounded-md overflow-hidden">
+              <pre className="font-mono text-sm text-amber-100 whitespace-pre-wrap break-words leading-relaxed p-6">
+                {plaintext}
+              </pre>
+              <div className="border-t border-amber-500/20 px-4 py-3 flex items-center justify-end">
+                <button
+                  onClick={handleCopy}
+                  className="flex items-center gap-2 font-mono text-xs font-semibold uppercase tracking-wider
+                             bg-zinc-900 text-zinc-400 px-3 py-1.5 rounded
+                             hover:bg-zinc-800 hover:text-amber-400
+                             active:bg-zinc-700
+                             transition-colors border border-zinc-800"
+                >
+                  {copied ? (
+                    <>
+                      <Check className="w-4 h-4 text-emerald-400" />
+                      <span className="text-emerald-400">Copied</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-4 h-4" />
+                      <span>Copy Secret</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          )}
 
           <div className="flex items-start gap-3 bg-red-900/20 border border-red-900/40 rounded-md px-4 py-3">
             <EyeOff className="w-5 h-5 text-red-500 mt-0.5 shrink-0" />
@@ -149,7 +317,9 @@ export default function SecretViewer() {
               </p>
               <p className="font-mono text-xs text-red-500/70">
                 Once you navigate away from this page, it cannot be viewed
-                again. Copy the secret now if you need to keep it.
+                again.
+                {!isImage &&
+                  " Copy the secret now if you need to keep it."}
               </p>
             </div>
           </div>

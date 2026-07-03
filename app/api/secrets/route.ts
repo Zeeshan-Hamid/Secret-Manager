@@ -10,7 +10,7 @@ export async function POST(request: Request) {
   try {
     const body = await request.json();
 
-    // Validate input
+    // Validate input — text or image
     const parsed = createSecretSchema.safeParse(body);
     if (!parsed.success) {
       return Response.json(
@@ -19,13 +19,37 @@ export async function POST(request: Request) {
       );
     }
 
-    const { encryptedBlob } = parsed.data;
-
-    // Generate random, unguessable ID
+    const input = parsed.data;
     const id = nanoid(25);
 
-    // Store in Redis with 24h TTL
-    await redisSet(`secret:${id}`, encryptedBlob, SECRET_TTL_SECONDS);
+    // Narrow the union type via discriminator check
+    if ("type" in input && (input.type === "image" || input.type === "combined")) {
+      const img = input as typeof input & {
+        type: "image" | "combined";
+        blobUrl: string;
+        contentType?: string;
+        imageContentType?: string;
+      };
+      const record = {
+        type: img.type,
+        blobUrl: img.blobUrl,
+        ...(img.type === "image"
+          ? { contentType: img.contentType }
+          : { imageContentType: img.imageContentType }),
+      };
+      await redisSet(
+        `secret:${id}`,
+        JSON.stringify(record),
+        SECRET_TTL_SECONDS
+      );
+    } else {
+      const txt = input as typeof input & { encryptedBlob: string };
+      await redisSet(
+        `secret:${id}`,
+        txt.encryptedBlob,
+        SECRET_TTL_SECONDS
+      );
+    }
 
     return Response.json({ id }, { status: 201 });
   } catch (error) {

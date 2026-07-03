@@ -2,7 +2,7 @@
 
 **Zero-knowledge, one-time secret sharing built for internal teams.**
 
-Share passwords, API keys, credentials, and confidential text securely. Every secret is encrypted in the browser before it leaves your machine. The server never sees plaintext — it's a dumb courier holding encrypted blobs that self-destruct after 24 hours (or the first view, whichever comes first). No database. No user accounts. No audit trail. No trust in the server.
+Share passwords, API keys, credentials, confidential text, and images securely — or combine text with an image in a single shareable link. Every secret is encrypted in the browser before it leaves your machine. The server never sees plaintext — it's a dumb courier holding encrypted blobs that self-destruct after 24 hours (or the first view, whichever comes first). No database. No user accounts. No audit trail. No trust in the server.
 
 ---
 
@@ -51,7 +51,7 @@ Share passwords, API keys, credentials, and confidential text securely. Every se
 ```mermaid
 flowchart LR
     subgraph Creator["Creator's Browser"]
-        C[/"Type secret"/]
+        C[/"Type text + upload image"/]
     end
 
     subgraph Viewer["Viewer's Browser"]
@@ -63,21 +63,27 @@ flowchart LR
             API["API Routes<br/>POST & GET /api/secrets"]
         end
         subgraph Redis["Upstash Redis"]
-            DB[("Encrypted<br/>blobs<br/>+ TTL")]
+            DB[("Secrets<br/>+ TTL")]
+        end
+        subgraph Blob["Vercel Blob"]
+            FS[("Encrypted<br/>images")]
         end
     end
 
-    Creator -->|"POST {encryptedBlob}<br/>Key stays in browser"| API
+    Creator -->|"POST encrypted blob<br/>Key stays in browser"| API
     Viewer -->|"GET /api/secrets/{id}"| API
     API -->|"SET + TTL"| DB
     API -->|"GETDEL"| DB
+    API -->|"put/get/del"| FS
 
     style Creator fill:#1a1a2e,stroke:#f59e0b,color:#fafafa
     style Viewer fill:#1a1a2e,stroke:#10b981,color:#fafafa
     style Vercel fill:#18181b,stroke:#3f3f46,color:#a1a1aa
     style NextJS fill:#27272a,stroke:#52525b,color:#fafafa
     style Redis fill:#27272a,stroke:#ef4444,color:#fafafa
+    style Blob fill:#27272a,stroke:#3b82f6,color:#fafafa
     style DB fill:#1a1a2e,stroke:#ef4444,color:#fbbf24
+    style FS fill:#1a1a2e,stroke:#3b82f6,color:#93c5fd
     style API fill:#1a1a2e,stroke:#52525b,color:#fafafa
 ```
 
@@ -111,6 +117,20 @@ sequenceDiagram
     Note over C,R: Server has only encrypted blob.
     Note over C,R: Blob auto-deletes after TTL.
 ```
+
+### Image & Combined Secrets
+
+The system supports three secret types: **text-only**, **image-only**, and **combined** (text + image in one link).
+
+**Image storage architecture**: Image bytes are too large for Redis and can exceed Vercel's 4.5MB function body limit. Instead:
+
+1. **Create**: Browser encrypts the image client-side → encrypted ciphertext uploaded to Vercel Blob (private store, server-proxied) → Redis stores a pointer `{ type, blobUrl, contentType }`.
+2. **View**: `GETDEL` from Redis returns the pointer → server fetches the encrypted blob from Vercel Blob via `get()` → streams binary to the viewer → viewer decrypts and renders.
+3. **Cleanup**: After streaming, `del()` is called on the Blob URL (fire-and-forget). If it fails, the encrypted blob lingers but is cryptographically useless without the decryption key.
+
+**Combined secrets**: Text and image are packed into a single binary buffer using a 4-byte big-endian length header (`[4 bytes: textLen][text bytes][image bytes]`), then encrypted together with one AES-256-GCM operation. The viewer unpacks the decrypted buffer to display both.
+
+**Why not public Blob URLs?** Private Blob storage means the encrypted ciphertext is never directly accessible from a browser URL — it must go through the server. This adds a layer of indirection (the Blob URL itself is never exposed to the viewer) and allows the server to enforce the one-time `GETDEL` + `del()` cleanup pattern.
 
 ### Viewer Flow — Sequence Diagram
 
@@ -245,7 +265,6 @@ This system is deliberately minimal. Every absent component is an intentional de
 | **Audit logs** | Zero-knowledge design — server observes nothing beyond blob existence. | No log table, no retention policies, no log queries. |
 | **Cron jobs / purge workers** | Redis's built-in `EXPIRE` evicts keys automatically. No manual cleanup. | No background job infrastructure, no dead-letter queues. |
 | **Message queue / pub-sub** | Synchronous request-response. No async workflows needed. | No queue dependencies, no retry logic complexity. |
-| **File uploads / chunked encryption** | Text-only by design. Files add chunking, streaming, and storage complexity. | Simpler crypto, simpler storage. |
 | **Rate limiting layer** | `GETDEL` makes brute-forcing pointless — each ID works exactly once, then it's gone. The ID space is 10³⁶+. | No Redis rate limit counters, no IP tracking. |
 | **WebSockets / real-time** | No collaborative editing, no live status updates needed. | Simpler server, no connection management. |
 
@@ -325,7 +344,7 @@ Data leaves the user's browser only after encryption. The plaintext never exists
 | **Runtime** | React | 19 |
 | **Language** | TypeScript | 5 |
 | **Styling** | Tailwind CSS | 4 |
-| **Storage** | Upstash Redis (serverless) | — |
+| **Storage** | Upstash Redis (serverless), Vercel Blob | — |
 | **Crypto** | Web Crypto API (browser-native) | — |
 | **Validation** | Zod | 3 |
 | **ID Generation** | nanoid | 5 |
@@ -340,6 +359,7 @@ Data leaves the user's browser only after encryption. The plaintext never exists
 
 - Node.js 20+
 - An [Upstash Redis](https://console.upstash.com) database (free tier works)
+- A [Vercel Blob](https://vercel.com/storage/blob) store for image support (on Vercel, OIDC handles auth automatically; for local dev, set `BLOB_READ_WRITE_TOKEN`)
 
 ### Setup
 
@@ -352,15 +372,20 @@ npm install
 cp .env.example .env.local
 ```
 
-Edit `.env.local` with your Upstash credentials:
+Edit `.env.local`:
 
 ```bash
 UPSTASH_REDIS_REST_URL=https://your-db.upstash.io
 UPSTASH_REDIS_REST_TOKEN=your_token_here
 
+# For image support — local dev only (Vercel uses OIDC automatically)
+BLOB_READ_WRITE_TOKEN=vercel_blob_rw_...
+
 # Optional: secret TTL in seconds (default: 86400 = 24 hours)
-# For testing, set to 60 (1 minute)
 SECRET_TTL_SECONDS=86400
+
+# Optional: max image upload size in MB (default: 10)
+MAX_IMAGE_SIZE_MB=4
 ```
 
 ### Run Locally
@@ -374,10 +399,11 @@ npm run dev
 
 1. Push to GitHub
 2. Import the repo into Vercel
-3. Add the three environment variables from `.env.local` in Vercel's project settings
+3. Add environment variables in Vercel project settings:
+   - `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN` (from Upstash Console)
+   - `SECRET_TTL_SECONDS=86400` (optional, default 24h)
+   - `BLOB_READ_WRITE_TOKEN` is NOT needed on Vercel — OIDC handles Blob auth automatically via `VERCEL_OIDC_TOKEN` + `BLOB_STORE_ID`
 4. Deploy
-
-For production, set `SECRET_TTL_SECONDS=86400` (or omit it — 24 hours is the default).
 
 ---
 
@@ -394,20 +420,23 @@ secret-manager/
 │   │   └── [id]/
 │   │       └── page.tsx           # Viewer page: SecretViewer
 │   └── api/
-│       └── secrets/
-│           ├── route.ts           # POST — create secret (SET with TTL)
-│           └── [id]/
-│               └── route.ts       # GET — view secret (GETDEL, one-time)
+│       ├── secrets/
+│       │   ├── route.ts           # POST — create secret (text, image, or combined)
+│       │   └── [id]/
+│       │       └── route.ts       # GET — view secret (GETDEL + stream from Blob)
+│       └── upload/
+│           └── route.ts           # POST — upload encrypted file to Vercel Blob
 │
 ├── components/
-│   ├── SecretForm.tsx             # Textarea → encrypt → POST → construct link
-│   ├── SecretViewer.tsx           # Fetch blob → extract key → decrypt → display + copy
+│   ├── SecretForm.tsx             # Text input + image picker → encrypt → POST → link
+│   ├── SecretViewer.tsx           # Fetch → decrypt → display text/image/combined
 │   └── LinkDisplay.tsx            # Show generated link + copy button + expiry warning
 │
 ├── lib/
-│   ├── crypto.ts                  # Web Crypto wrapper — AES-256-GCM encrypt/decrypt
+│   ├── crypto.ts                  # Web Crypto wrapper — AES-256-GCM + packPayload/unpackPayload
 │   ├── redis.ts                   # Lazy Upstash Redis client singleton
-│   ├── validators.ts              # Zod schema — secret validation (200KB limit)
+│   ├── blob.ts                    # Vercel Blob client (put, get, del)
+│   ├── validators.ts              # Zod schema — text, image, and combined payloads
 │   └── types.ts                   # Shared TypeScript types
 │
 ├── middleware.ts                  # (Reserved for future auth gating)
@@ -440,6 +469,14 @@ The fragment (`#...`) is the only part of a URL that browsers never include in H
 ### Why GETDEL instead of GET + DELETE?
 
 Two separate operations create a race condition: if two viewers open the link at the exact same time, both could receive the blob before either deletes it. `GETDEL` is a single atomic Redis command that returns the value AND deletes the key in one operation. The second caller always receives null. No database transactions, no distributed locks, no retry logic needed.
+
+### Why Vercel Blob for images?
+
+Text secrets are small enough to store directly in Redis (ciphertext is base64-encoded, typically <1KB). Images, even encrypted, can be several megabytes — too large for Redis's value-size limits and too expensive to store in an in-memory database. Vercel Blob provides durable object storage, server-proxied private access (the Blob URL is never exposed to the viewer), and zero-config OIDC auth on Vercel deployments. The two-tier storage pattern (Redis pointer + Blob binary) keeps Redis fast and lean while offloading binary data to purpose-built object storage.
+
+### Why pack text + image into one encrypted blob?
+
+For combined secrets, text and image are serialized together at the plaintext level using a simple 4-byte length-prefixed binary format (`[4 bytes: textLen][text bytes][image bytes]`), then encrypted with a single AES-256-GCM operation. This avoids the complexity of managing two separate ciphertexts, two IVs, and two GCM auth tags. The viewer gets both content types in a single atomic view — no risk of seeing text without the image or vice versa.
 
 ### Why nanoid for IDs?
 
