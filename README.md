@@ -158,12 +158,12 @@ sequenceDiagram
 ```mermaid
 flowchart LR
     subgraph Browser["Browser (Trusted)"]
-        direction TB
         Plaintext["Plaintext Secret"]
         Key["AES-256 Key"]
         Crypto["Web Crypto API"]
-        Fragment["URL Fragment']
+        Fragment["URL Fragment"]
         Encrypted["Encrypted Blob"]
+
         Plaintext --> Crypto
         Key --> Crypto
         Crypto --> Encrypted
@@ -175,15 +175,14 @@ flowchart LR
     end
 
     subgraph Server["Server (Untrusted)"]
-        direction TB
         API["API Routes"]
         DB[("Redis Store")]
-        API -->|"SET / GETDEL"| DB
+        API --> DB
     end
 
-    Browser -->|"POST {blob} | No key, no plaintext"| Network
+    Browser --> Network
     Network --> Server
-    Server -->|"{blob} or 410 Gone"| Network
+    Server --> Network
     Network --> Browser
 
     style Plaintext fill:#991b1b,stroke:#ef4444,color:#fca5a5
